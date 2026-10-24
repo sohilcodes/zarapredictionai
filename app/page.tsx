@@ -1,694 +1,611 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import {
-  Activity,
-  BrainCircuit,
-  Clock3,
-  RefreshCw,
-  ShieldCheck,
-  Signal,
-  Wifi,
-  WifiOff,
-  Zap,
+Activity,
+BrainCircuit,
+Clock3,
+RefreshCw,
+ShieldCheck,
+Signal,
+Wifi,
+WifiOff,
+Zap,
 } from "lucide-react";
 
 type Result = {
-  issueNumber: string;
-  number: number;
-  color: string;
-  premium?: string | number;
-  sum?: number;
+issueNumber: string;
+number: number;
+color: string;
+premium?: string | number;
+sum?: number;
 };
 
 type ApiPayload = {
-  ok: boolean;
-  source?: string;
-  fetchedAt?: string;
-  error?: string;
-  details?: string[];
-  data?: unknown;
+ok: boolean;
+source?: string;
+fetchedAt?: string;
+error?: string;
+details?: string[];
+data?: unknown;
 };
 
 function extractHistory(data: unknown): unknown[] {
-  if (!data || typeof data !== "object") {
-    return [];
+if (!data || typeof data !== "object") return [];
+
+const root = data as Record<string, unknown>;
+
+if (Array.isArray(root.list)) return root.list;
+
+const nested = root.data;
+
+if (Array.isArray(nested)) return nested;
+
+if (nested && typeof nested === "object") {
+const nestedObject = nested as Record<string, unknown>;
+
+if (Array.isArray(nestedObject.list)) {
+  return nestedObject.list;
+}
+
+const inner = nestedObject.data;
+
+if (inner && typeof inner === "object") {
+  const innerObject = inner as Record<string, unknown>;
+
+  if (Array.isArray(innerObject.list)) {
+    return innerObject.list;
   }
+}
 
-  const root = data as Record<string, unknown>;
+}
 
-  // Handle the common WinGo response:
-  // { data: { list: [...] } }
-  const nested = root.data;
-
-  if (nested && typeof nested === "object") {
-    const nestedObject = nested as Record<string, unknown>;
-
-    if (Array.isArray(nestedObject.list)) {
-      return nestedObject.list;
-    }
-
-    // Some providers return { data: [...] }
-    if (Array.isArray(nested)) {
-      return nested;
-    }
-
-    // Also support { data: { data: { list: [...] } } }
-    const inner = nestedObject.data;
-
-    if (inner && typeof inner === "object") {
-      const innerObject = inner as Record<string, unknown>;
-
-      if (Array.isArray(innerObject.list)) {
-        return innerObject.list;
-      }
-    }
-  }
-
-  // Alternative shape: { list: [...] }
-  if (Array.isArray(root.list)) {
-    return root.list;
-  }
-
-  return [];
+return [];
 }
 
 function parseResults(data: unknown): Result[] {
-  const rows = extractHistory(data);
+return extractHistory(data)
+.map((item): Result | null => {
+if (!item || typeof item !== "object") return null;
 
-  return rows
-    .map((item): Result | null => {
-      if (!item || typeof item !== "object") {
-        return null;
-      }
+  const row = item as Record<string, unknown>;
+  const issueNumber = String(row.issueNumber ?? "");
+  const number = Number(row.number);
 
-      const row = item as Record<string, unknown>;
+  if (
+    !issueNumber ||
+    !Number.isInteger(number) ||
+    number < 0 ||
+    number > 9
+  ) {
+    return null;
+  }
 
-      const issueNumber = String(row.issueNumber ?? "");
-      const number = Number(row.number);
+  return {
+    issueNumber,
+    number,
+    color: String(row.color ?? ""),
+    premium:
+      typeof row.premium === "string" ||
+      typeof row.premium === "number"
+        ? row.premium
+        : undefined,
+    sum:
+      row.sum !== undefined && Number.isFinite(Number(row.sum))
+        ? Number(row.sum)
+        : undefined,
+  };
+})
+.filter((item): item is Result => item !== null);
 
-      if (
-        !issueNumber ||
-        !Number.isInteger(number) ||
-        number < 0 ||
-        number > 9
-      ) {
-        return null;
-      }
-
-      return {
-        issueNumber,
-        number,
-        color: String(row.color ?? ""),
-        premium:
-          typeof row.premium === "string" ||
-          typeof row.premium === "number"
-            ? row.premium
-            : undefined,
-        sum:
-          row.sum !== undefined && Number.isFinite(Number(row.sum))
-            ? Number(row.sum)
-            : undefined,
-      };
-    })
-    .filter((item): item is Result => item !== null);
 }
 
 function classifyNumber(number: number): "BIG" | "SMALL" {
-  return number >= 5 ? "BIG" : "SMALL";
+return number >= 5 ? "BIG" : "SMALL";
 }
 
-/*
- * Common WinGo color mapping:
- * 0 = Red + Violet
- * 5 = Green + Violet
- * 2,4,6,8 = Red
- * 1,3,7,9 = Green
- *
- * Confirm this mapping against the provider's actual game rules.
- */
 function classifyColor(number: number): string {
-  if (number === 0) return "RED + VIOLET";
-  if (number === 5) return "GREEN + VIOLET";
-
-  return number % 2 === 0 ? "RED" : "GREEN";
+if (number === 0) return "RED + VIOLET";
+if (number === 5) return "GREEN + VIOLET";
+return number % 2 === 0 ? "RED" : "GREEN";
 }
 
 /*
- * Estimate the next issue ID only when the latest ID is numeric.
- * This assumes consecutive issue IDs, which must be verified.
- */
-function estimateNextPeriod(issue: string): string | null {
-  if (!/^\d+$/.test(issue)) {
-    return null;
-  }
 
-  try {
-    const next = (BigInt(issue) + 1n).toString();
+* Compatible with older TypeScript targets.
+* This estimates the next ID by adding 1 to the numeric string.
+* The provider's actual period sequence must be verified.
+  */
+  function estimateNextPeriod(issue: string): string | null {
+  if (!/^\d+$/.test(issue)) return null;
 
-    return next.padStart(issue.length, "0");
-  } catch {
-    return null;
-  }
+const digits = issue.split("");
+let carry = 1;
+
+for (let i = digits.length - 1; i >= 0 && carry; i--) {
+const digit = Number(digits[i]) + carry;
+
+digits[i] = String(digit % 10);
+carry = digit >= 10 ? 1 : 0;
+
+}
+
+if (carry) digits.unshift("1");
+
+return digits.join("").padStart(issue.length, "0");
 }
 
 function getErrorMessage(payload: ApiPayload): string {
-  if (payload.error) {
-    const details = payload.details?.slice(0, 3).join(" | ");
+const details = payload.details?.slice(0, 3).join(" | ");
 
-    return details
-      ? `${payload.error} ${details}`
-      : payload.error;
-  }
+if (payload.error && details) {
+return "${payload.error} ${details}";
+}
 
-  return "Unable to load history.";
+return payload.error || "Unable to load history.";
 }
 
 export default function Home() {
-  const [results, setResults] = useState<Result[]>([]);
-  const [connected, setConnected] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
-  const [lastUpdated, setLastUpdated] = useState("");
-  const [source, setSource] = useState("");
-  const [seconds, setSeconds] = useState(59);
-  const [now, setNow] = useState(Date.now());
+const [results, setResults] = useState<Result[]>([]);
+const [connected, setConnected] = useState(false);
+const [loading, setLoading] = useState(true);
+const [refreshing, setRefreshing] = useState(false);
+const [error, setError] = useState("");
+const [lastUpdated, setLastUpdated] = useState("");
+const [source, setSource] = useState("");
+const [now, setNow] = useState(0);
 
-  const lastMinuteRef = useRef(
-    Math.floor(Date.now() / 60000)
+const lastMinuteRef = useRef(Math.floor(Date.now() / 60000));
+const requestInProgressRef = useRef(false);
+
+const refreshHistory = useCallback(async () => {
+if (requestInProgressRef.current) return;
+
+requestInProgressRef.current = true;
+setRefreshing(true);
+
+try {
+  const response = await fetch(`/api/history?_=${Date.now()}`, {
+    cache: "no-store",
+  });
+
+  const payload = (await response.json()) as ApiPayload;
+
+  if (!response.ok || !payload.ok) {
+    throw new Error(getErrorMessage(payload));
+  }
+
+  const parsed = parseResults(payload.data);
+
+  if (parsed.length === 0) {
+    throw new Error(
+      "API returned no valid history records. Check the API response format."
+    );
+  }
+
+  setResults(parsed);
+  setConnected(true);
+  setError("");
+  setSource(payload.source || "WinGo History API");
+  setLastUpdated(new Date().toLocaleTimeString());
+} catch (err) {
+  setConnected(false);
+  setError(
+    err instanceof Error ? err.message : "History request failed."
   );
+} finally {
+  setLoading(false);
+  setRefreshing(false);
+  requestInProgressRef.current = false;
+}
 
-  const requestInProgressRef = useRef(false);
+}, []);
 
-  const refreshHistory = useCallback(async () => {
-    if (requestInProgressRef.current) {
-      return;
-    }
+useEffect(() => {
+setNow(Date.now());
+void refreshHistory();
 
-    requestInProgressRef.current = true;
-    setRefreshing(true);
+const clockTimer = window.setInterval(() => {
+  const timestamp = Date.now();
+  setNow(timestamp);
 
-    try {
-      const response = await fetch(
-        `/api/history?_=${Date.now()}`,
-        {
-          cache: "no-store",
-        }
-      );
+  const currentMinute = Math.floor(timestamp / 60000);
 
-      const payload = (await response.json()) as ApiPayload;
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(getErrorMessage(payload));
-      }
-
-      const parsed = parseResults(payload.data);
-
-      if (parsed.length === 0) {
-        throw new Error(
-          "API responded, but no valid result records were found. Check the response structure."
-        );
-      }
-
-      setResults(parsed);
-      setConnected(true);
-      setError("");
-      setSource(payload.source ?? "WinGo history API");
-      setLastUpdated(new Date().toLocaleTimeString());
-    } catch (err) {
-      setConnected(false);
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unexpected history API error."
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-      requestInProgressRef.current = false;
-    }
-  }, []);
-
-  useEffect(() => {
+  if (currentMinute !== lastMinuteRef.current) {
+    lastMinuteRef.current = currentMinute;
     void refreshHistory();
+  }
+}, 250);
 
-    const clockTimer = window.setInterval(() => {
-      const timestamp = Date.now();
+const refreshTimer = window.setInterval(() => {
+  void refreshHistory();
+}, 15000);
 
-      setNow(timestamp);
+return () => {
+  window.clearInterval(clockTimer);
+  window.clearInterval(refreshTimer);
+};
 
-      const currentMinute = Math.floor(timestamp / 60000);
+}, [refreshHistory]);
 
-      setSeconds(
-        59 - Math.floor((timestamp % 60000) / 1000)
-      );
+const latest = results[0];
+const sample = results.slice(0, 20);
 
-      if (currentMinute !== lastMinuteRef.current) {
-        lastMinuteRef.current = currentMinute;
-        void refreshHistory();
-      }
-    }, 250);
+const bigCount = sample.filter(
+(item) => classifyNumber(item.number) === "BIG"
+).length;
 
-    const refreshTimer = window.setInterval(() => {
-      void refreshHistory();
-    }, 15000);
+const smallCount = sample.filter(
+(item) => classifyNumber(item.number) === "SMALL"
+).length;
 
-    return () => {
-      window.clearInterval(clockTimer);
-      window.clearInterval(refreshTimer);
-    };
-  }, [refreshHistory]);
+const bigPercent =
+sample.length > 0
+? Math.round((bigCount / sample.length) * 100)
+: 0;
 
-  const latest = results[0];
+const smallPercent =
+sample.length > 0
+? Math.round((smallCount / sample.length) * 100)
+: 0;
 
-  /*
-   * The history API contains completed rounds.
-   * The next period is an estimate, not a verified current game period.
-   */
-  const estimatedNextPeriod = latest
-    ? estimateNextPeriod(latest.issueNumber)
-    : null;
+const estimatedNextPeriod = latest
+? estimateNextPeriod(latest.issueNumber)
+: null;
 
-  const sample = results.slice(0, 20);
+const secondsRemaining =
+now === 0 ? 60 : 60 - Math.floor((now % 60000) / 1000);
 
-  const bigCount = sample.filter(
-    (item) => classifyNumber(item.number) === "BIG"
-  ).length;
+const countdown = "00:${String( secondsRemaining === 60 ? 0 : secondsRemaining ).padStart(2, "0")}";
 
-  const smallCount = sample.filter(
-    (item) => classifyNumber(item.number) === "SMALL"
-  ).length;
+const historicalBias =
+sample.length < 10
+? "INSUFFICIENT DATA"
+: bigCount === smallCount
+? "BALANCED FREQUENCY"
+: bigCount > smallCount
+? "BIG MORE FREQUENT"
+: "SMALL MORE FREQUENT";
 
-  const bigPercent =
-    sample.length > 0
-      ? Math.round((bigCount / sample.length) * 100)
-      : 0;
+return (
+<main className="dashboard">
+<header className="topbar">
+<a href="#" className="brand">
+<span className="brand-icon">
+<BrainCircuit size={24} />
+</span>
 
-  const smallPercent =
-    sample.length > 0
-      ? Math.round((smallCount / sample.length) * 100)
-      : 0;
+      <span>
+        <strong>ZARA AI</strong>
+        <small>PREDICTOR</small>
+      </span>
+    </a>
 
-  /*
-   * Descriptive historical tendency only.
-   * This is not a trained or validated prediction model.
-   */
-  const historicalBias =
-    sample.length < 10
-      ? "INSUFFICIENT DATA"
-      : bigCount === smallCount
-        ? "BALANCED"
-        : bigCount > smallCount
-          ? "BIG MORE FREQUENT"
-          : "SMALL MORE FREQUENT";
+    <div className={`connection ${connected ? "online" : "offline"}`}>
+      <span className="connection-dot" />
+      {connected ? "API CONNECTED" : "API DISCONNECTED"}
+    </div>
+  </header>
 
-  const remaining =
-    60 - Math.floor((now % 60000) / 1000);
+  <section className="hero">
+    <div className="eyebrow">
+      <span className="live-dot" />
+      WINGO INTELLIGENCE SYSTEM
+    </div>
 
-  const countdown = `00:${String(
-    remaining === 60 ? 0 : remaining
-  ).padStart(2, "0")}`;
+    <h1>
+      Predict smarter.
+      <br />
+      <span>Analyze every round.</span>
+    </h1>
 
-  return (
-    <main className="dashboard">
-      <header className="topbar">
-        <a href="#" className="brand">
-          <span className="brand-icon">
-            <BrainCircuit size={24} />
-          </span>
+    <p>
+      Automatic history refresh, live countdown and historical analysis.
+    </p>
+  </section>
 
-          <span>
-            <strong>ZARA AI</strong>
-            <small>PREDICTOR</small>
-          </span>
-        </a>
+  <section className="gamebar">
+    <div className="game-info">
+      <div className="game-icon">
+        <Activity size={25} />
+      </div>
 
+      <div>
+        <h2>WinGo 1 Minute</h2>
+        <p>Historical data analysis</p>
+      </div>
+    </div>
+
+    <div className="timer">
+      <Clock3 size={16} />
+      <span>{countdown}</span>
+    </div>
+  </section>
+
+  <section className="main-grid">
+    <article className="card signal-card">
+      <div className="card-heading">
+        <div>
+          <span className="section-label">LATEST COMPLETED RESULT</span>
+          <h2>Live Result</h2>
+        </div>
+
+        <span className="icon-box">
+          <Signal size={19} />
+        </span>
+      </div>
+
+      {latest ? (
+        <>
+          <div className="result-number">
+            <span className={`number-ball n${latest.number}`}>
+              {latest.number}
+            </span>
+
+            <div>
+              <strong>{classifyNumber(latest.number)}</strong>
+              <span className="muted">{classifyColor(latest.number)}</span>
+            </div>
+          </div>
+
+          <div className="period-box">
+            <span>Latest completed period</span>
+            <strong>{latest.issueNumber}</strong>
+          </div>
+        </>
+      ) : (
+        <div className="empty-state">
+          {loading ? "Fetching actual results..." : "No result available"}
+        </div>
+      )}
+
+      <div className="divider" />
+
+      <div className="card-heading">
+        <div>
+          <span className="section-label">NEXT ROUND</span>
+          <h3>Estimated Period</h3>
+        </div>
+
+        <Zap size={20} className="accent-icon" />
+      </div>
+
+      <div className="period-box next-period">
+        <span>Estimated next issue ID</span>
+        <strong>
+          {estimatedNextPeriod || "Waiting for valid period ID"}
+        </strong>
+      </div>
+
+      <div className="outlook">
+        <div className="outlook-badge">
+          <BrainCircuit size={18} />
+        </div>
+
+        <div>
+          <strong>{historicalBias}</strong>
+
+          <p>
+            {sample.length < 10
+              ? "At least 10 completed results are needed for this frequency summary."
+              : `In the latest ${sample.length} results, BIG occurred ${bigCount} times and SMALL occurred ${smallCount} times.`}
+          </p>
+        </div>
+      </div>
+
+      <p className="disclaimer">
+        The next issue is estimated by incrementing the latest result ID.
+        Verify this sequence against the live game. Historical frequency
+        cannot guarantee the next outcome.
+      </p>
+    </article>
+
+    <article className="card">
+      <div className="card-heading">
+        <div>
+          <span className="section-label">HISTORICAL DISTRIBUTION</span>
+          <h2>Big / Small</h2>
+        </div>
+
+        <span className="icon-box">
+          <Activity size={19} />
+        </span>
+      </div>
+
+      <p className="muted small">
+        Latest {sample.length} completed results
+      </p>
+
+      <div className="stat-row">
+        <div className="stat-title">
+          <span className="legend-dot big-dot" />
+          <strong>BIG</strong>
+          <span>{bigCount} results</span>
+        </div>
+
+        <strong className="stat-percent">{bigPercent}%</strong>
+      </div>
+
+      <div className="progress-track">
         <div
-          className={`connection ${
-            connected ? "online" : "offline"
-          }`}
-        >
-          <span className="connection-dot" />
-          {connected ? "API CONNECTED" : "API DISCONNECTED"}
-        </div>
-      </header>
+          className="progress-fill big-fill"
+          style={{ width: `${bigPercent}%` }}
+        />
+      </div>
 
-      <section className="hero">
-        <div className="eyebrow">
-          <span className="live-dot" />
-          WINGO INTELLIGENCE SYSTEM
+      <div className="stat-row">
+        <div className="stat-title">
+          <span className="legend-dot small-dot" />
+          <strong>SMALL</strong>
+          <span>{smallCount} results</span>
         </div>
 
-        <h1>
-          Predict smarter.
-          <br />
-          <span>Analyze every round.</span>
-        </h1>
+        <strong className="stat-percent">{smallPercent}%</strong>
+      </div>
 
-        <p>
-          Automatic history refresh, live countdown and transparent
-          historical analysis.
-        </p>
-      </section>
+      <div className="progress-track">
+        <div
+          className="progress-fill small-fill"
+          style={{ width: `${smallPercent}%` }}
+        />
+      </div>
 
-      <section className="gamebar">
-        <div className="game-info">
-          <div className="game-icon">
-            <Activity size={25} />
-          </div>
-
-          <div>
-            <h2>WinGo 1 Minute</h2>
-            <p>Historical data analysis</p>
-          </div>
+      <div className="mini-stats">
+        <div>
+          <span>Big numbers</span>
+          <strong>{bigCount}</strong>
         </div>
 
-        <div className="timer">
-          <Clock3 size={16} />
-          <span>{countdown}</span>
+        <div>
+          <span>Small numbers</span>
+          <strong>{smallCount}</strong>
         </div>
-      </section>
 
-      <section className="main-grid">
-        <article className="card signal-card">
-          <div className="card-heading">
-            <div>
-              <span className="section-label">
-                LATEST COMPLETED RESULT
-              </span>
-              <h2>Live Result</h2>
-            </div>
+        <div>
+          <span>Sample size</span>
+          <strong>{sample.length}</strong>
+        </div>
+      </div>
 
-            <span className="icon-box">
-              <Signal size={19} />
-            </span>
-          </div>
+      <p className="muted footnote">
+        Past frequency describes previous results, not the probability
+        of the next result.
+      </p>
+    </article>
+  </section>
 
-          {latest ? (
-            <>
-              <div className="result-number">
-                <span className={`number-ball n${latest.number}`}>
-                  {latest.number}
+  <section className="card history-card">
+    <div className="card-heading">
+      <div>
+        <span className="section-label">LIVE DATA FEED</span>
+        <h2>Recent History</h2>
+      </div>
+
+      <button
+        className="refresh-button"
+        onClick={() => void refreshHistory()}
+        disabled={refreshing}
+      >
+        <RefreshCw className={refreshing ? "spin" : ""} size={16} />
+        {refreshing ? "Refreshing..." : "Refresh"}
+      </button>
+    </div>
+
+    {error && (
+      <div className="error-banner">
+        <WifiOff size={17} />
+        <span>{error}</span>
+      </div>
+    )}
+
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>PERIOD</th>
+            <th>NUMBER</th>
+            <th>BIG / SMALL</th>
+            <th>COLOR</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {results.map((item) => (
+            <tr key={item.issueNumber}>
+              <td className="period-cell">{item.issueNumber}</td>
+
+              <td>
+                <span className={`number-ball table-ball n${item.number}`}>
+                  {item.number}
                 </span>
+              </td>
 
-                <div>
-                  <strong>{classifyNumber(latest.number)}</strong>
-                  <span className="muted">
-                    {classifyColor(latest.number)}
-                  </span>
-                </div>
-              </div>
+              <td>
+                <span
+                  className={`size-tag ${
+                    classifyNumber(item.number) === "BIG"
+                      ? "tag-big"
+                      : "tag-small"
+                  }`}
+                >
+                  {classifyNumber(item.number)}
+                </span>
+              </td>
 
-              <div className="period-box">
-                <span>Latest completed period</span>
-                <strong>{latest.issueNumber}</strong>
-              </div>
-            </>
-          ) : (
-            <div className="empty-state">
-              {loading
-                ? "Fetching actual results..."
-                : "No result available"}
-            </div>
+              <td>
+                <span className="color-cell">
+                  <span
+                    className={`legend-dot ${
+                      item.number === 0 || item.number % 2 === 0
+                        ? "big-dot"
+                        : "small-dot"
+                    }`}
+                  />
+                  {classifyColor(item.number)}
+                </span>
+              </td>
+            </tr>
+          ))}
+
+          {results.length === 0 && (
+            <tr>
+              <td colSpan={4} className="empty-table">
+                {loading
+                  ? "Loading real history..."
+                  : "No history loaded. Check the API connection."}
+              </td>
+            </tr>
           )}
+        </tbody>
+      </table>
+    </div>
 
-          <div className="divider" />
+    <div className="history-footer">
+      <span>
+        {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
+        {connected ? `Connected: ${source}` : "Waiting for connection"}
+      </span>
 
-          <div className="card-heading">
-            <div>
-              <span className="section-label">
-                NEXT ROUND
-              </span>
-              <h3>Estimated period</h3>
-            </div>
+      <span>Updated: {lastUpdated || "—"}</span>
+    </div>
+  </section>
 
-            <Zap size={20} className="accent-icon" />
-          </div>
+  <section className="info-grid">
+    <div className="info-card">
+      <ShieldCheck size={22} />
 
-          <div className="period-box next-period">
-            <span>Estimated next issue</span>
-
-            <strong>
-              {estimatedNextPeriod ?? "Waiting for valid period ID"}
-            </strong>
-          </div>
-
-          <div className="outlook">
-            <div className="outlook-badge">
-              <BrainCircuit size={18} />
-            </div>
-
-            <div>
-              <strong>{historicalBias}</strong>
-
-              <p>
-                {sample.length < 10
-                  ? "At least 10 completed results are needed for this basic frequency summary."
-                  : `In the latest ${sample.length} completed results, BIG occurred ${bigCount} times and SMALL occurred ${smallCount} times.`}
-              </p>
-            </div>
-          </div>
-
-          <p className="disclaimer">
-            The next issue is estimated from the last result ID.
-            Verify the actual game sequence. Historical frequency
-            cannot guarantee the next outcome.
-          </p>
-        </article>
-
-        <article className="card">
-          <div className="card-heading">
-            <div>
-              <span className="section-label">
-                HISTORICAL DISTRIBUTION
-              </span>
-              <h2>Big / Small</h2>
-            </div>
-
-            <span className="icon-box">
-              <Activity size={19} />
-            </span>
-          </div>
-
-          <p className="muted small">
-            Latest {sample.length} completed results
-          </p>
-
-          <div className="stat-row">
-            <div className="stat-title">
-              <span className="legend-dot big-dot" />
-              <strong>BIG</strong>
-              <span>{bigCount} results</span>
-            </div>
-
-            <strong className="stat-percent">
-              {bigPercent}%
-            </strong>
-          </div>
-
-          <div className="progress-track">
-            <div
-              className="progress-fill big-fill"
-              style={{ width: `${bigPercent}%` }}
-            />
-          </div>
-
-          <div className="stat-row">
-            <div className="stat-title">
-              <span className="legend-dot small-dot" />
-              <strong>SMALL</strong>
-              <span>{smallCount} results</span>
-            </div>
-
-            <strong className="stat-percent">
-              {smallPercent}%
-            </strong>
-          </div>
-
-          <div className="progress-track">
-            <div
-              className="progress-fill small-fill"
-              style={{ width: `${smallPercent}%` }}
-            />
-          </div>
-
-          <div className="mini-stats">
-            <div>
-              <span>Big numbers</span>
-              <strong>{bigCount}</strong>
-            </div>
-
-            <div>
-              <span>Small numbers</span>
-              <strong>{smallCount}</strong>
-            </div>
-
-            <div>
-              <span>Sample size</span>
-              <strong>{sample.length}</strong>
-            </div>
-          </div>
-
-          <p className="muted footnote">
-            Past frequency describes previous results, not the
-            probability of the next result.
-          </p>
-        </article>
-      </section>
-
-      <section className="card history-card">
-        <div className="card-heading">
-          <div>
-            <span className="section-label">LIVE DATA FEED</span>
-            <h2>Recent History</h2>
-          </div>
-
-          <button
-            className="refresh-button"
-            onClick={() => void refreshHistory()}
-            disabled={refreshing}
-          >
-            <RefreshCw
-              size={16}
-              className={refreshing ? "spin" : ""}
-            />
-
-            {refreshing ? "Refreshing" : "Refresh"}
-          </button>
-        </div>
-
-        {error && (
-          <div className="error-banner">
-            <WifiOff size={17} />
-
-            <span>{error}</span>
-          </div>
-        )}
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>PERIOD</th>
-                <th>NUMBER</th>
-                <th>BIG / SMALL</th>
-                <th>COLOR</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {results.map((item) => (
-                <tr key={item.issueNumber}>
-                  <td className="period-cell">
-                    {item.issueNumber}
-                  </td>
-
-                  <td>
-                    <span
-                      className={`number-ball table-ball n${item.number}`}
-                    >
-                      {item.number}
-                    </span>
-                  </td>
-
-                  <td>
-                    <span
-                      className={`size-tag ${
-                        classifyNumber(item.number) === "BIG"
-                          ? "tag-big"
-                          : "tag-small"
-                      }`}
-                    >
-                      {classifyNumber(item.number)}
-                    </span>
-                  </td>
-
-                  <td>
-                    <span className="color-cell">
-                      <span
-                        className={`legend-dot ${
-                          item.number === 0 ||
-                          item.number % 2 === 0
-                            ? "big-dot"
-                            : "small-dot"
-                        }`}
-                      />
-
-                      {classifyColor(item.number)}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-
-              {results.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="empty-table">
-                    {loading
-                      ? "Loading real history..."
-                      : "No history loaded. Check the API connection."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="history-footer">
-          <span>
-            {connected ? (
-              <Wifi size={14} />
-            ) : (
-              <WifiOff size={14} />
-            )}
-
-            {connected
-              ? `Connected: ${source}`
-              : "Waiting for connection"}
-          </span>
-
-          <span>Updated: {lastUpdated || "—"}</span>
-        </div>
-      </section>
-
-      <section className="info-grid">
-        <div className="info-card">
-          <ShieldCheck size={22} />
-
-          <div>
-            <strong>Real Data</strong>
-            <p>
-              Actual completed results are loaded from the configured
-              history API when available.
-            </p>
-          </div>
-        </div>
-
-        <div className="info-card">
-          <BrainCircuit size={22} />
-
-          <div>
-            <strong>Transparent Analysis</strong>
-            <p>
-              Historical frequencies are shown without claiming
-              guaranteed future results.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <footer>
-        <div className="footer-brand">ZARA AI PREDICTOR</div>
-
+      <div>
+        <strong>Real Data</strong>
         <p>
-          Informational analysis only. Predictions are uncertain.
-          No guaranteed outcomes. Play responsibly.
+          Completed results are loaded from the configured history API.
         </p>
+      </div>
+    </div>
 
-        <span>LIVE DATA • HISTORICAL ANALYSIS • 1M</span>
-      </footer>
-    </main>
-  );
+    <div className="info-card">
+      <BrainCircuit size={22} />
+
+      <div>
+        <strong>Transparent Analysis</strong>
+        <p>
+          Historical frequencies are displayed without guaranteed
+          prediction claims.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div className="footer-brand">ZARA AI PREDICTOR</div>
+
+    <p>
+      Informational analysis only. Predictions are uncertain. No
+      guaranteed outcomes. Play responsibly.
+    </p>
+
+    <span>LIVE DATA • HISTORICAL ANALYSIS • 1M</span>
+  </footer>
+</main>
+
+);
 }
