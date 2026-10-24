@@ -12,6 +12,8 @@ const API_HOSTS = [
   "draw.ar-lottery06.com",
 ];
 
+const TIMEOUT_MS = 8000;
+
 export async function GET() {
   const errors: string[] = [];
 
@@ -22,12 +24,14 @@ export async function GET() {
 
     try {
       const response = await fetch(url, {
+        method: "GET",
         cache: "no-store",
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
         headers: {
           Accept: "application/json, text/plain, */*",
           "User-Agent":
-            "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
           Referer: `https://${host}/`,
           Origin: `https://${host}`,
         },
@@ -54,20 +58,25 @@ export async function GET() {
         }
       );
     } catch (error) {
-      errors.push(
-        `${host}: ${
-          error instanceof Error ? error.message : "Request failed"
-        }`
-      );
+      const message =
+        error instanceof Error ? error.message : "Request failed";
+
+      errors.push(`${host}: ${message}`);
     }
   }
 
   return NextResponse.json(
     {
       ok: false,
-      error: "All configured history endpoints failed.",
+      error: "Unable to fetch WinGo history from configured hosts.",
       details: errors,
+      fetchedAt: new Date().toISOString(),
     },
-    { status: 502 }
+    {
+      status: 502,
+      headers: {
+        "Cache-Control": "no-store, max-age=0",
+      },
+    }
   );
 }
