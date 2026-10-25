@@ -15,6 +15,14 @@ const HOSTS = [
 
 const API_PATH = "/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
+type ApiAttempt = {
+host: string;
+status?: number;
+error?: string;
+contentType?: string;
+preview?: string;
+};
+
 function findRecords(payload: unknown): unknown[] {
 if (Array.isArray(payload)) {
 return payload;
@@ -26,15 +34,16 @@ return [];
 
 const object = payload as Record<string, unknown>;
 
-// Check common history list keys.
-for (const key of [
+const possibleKeys = [
 "list",
 "records",
 "results",
 "rows",
 "history",
 "data",
-]) {
+];
+
+for (const key of possibleKeys) {
 const value = object[key];
 
 if (Array.isArray(value)) {
@@ -55,15 +64,10 @@ return [];
 }
 
 export async function GET() {
-const attempts: Array<{
-host: string;
-status?: number;
-error?: string;
-contentType?: string;
-preview?: string;
-}> = [];
+const attempts: ApiAttempt[] = [];
 
 for (const host of HOSTS) {
+// IMPORTANT: Use backticks for template interpolation.
 const url = new URL("${host}${API_PATH}");
 
 url.searchParams.set("pageNo", "1");
@@ -88,7 +92,6 @@ try {
   const contentType =
     response.headers.get("content-type") || "";
 
-  // Read the body once so errors can be diagnosed.
   const body = await response.text();
 
   if (!response.ok) {
@@ -96,8 +99,10 @@ try {
       host,
       status: response.status,
       contentType,
-      preview: body.slice(0, 250),
+      error: `Upstream returned HTTP ${response.status}`,
+      preview: body.slice(0, 200),
     });
+
     continue;
   }
 
@@ -110,9 +115,10 @@ try {
       host,
       status: response.status,
       contentType,
-      error: "Response body is not valid JSON",
-      preview: body.slice(0, 250),
+      error: "Upstream response is not valid JSON",
+      preview: body.slice(0, 200),
     });
+
     continue;
   }
 
@@ -123,9 +129,10 @@ try {
       host,
       status: response.status,
       contentType,
-      error: "JSON received, but no recognized history array was found",
-      preview: JSON.stringify(payload).slice(0, 350),
+      error: "JSON received, but no history records were found",
+      preview: JSON.stringify(payload).slice(0, 300),
     });
+
     continue;
   }
 
@@ -139,8 +146,10 @@ try {
       data: payload,
     },
     {
+      status: 200,
       headers: {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate",
       },
     },
   );
@@ -159,8 +168,7 @@ try {
 return NextResponse.json(
 {
 ok: false,
-message:
-"No history source returned usable records. Check the diagnostic details.",
+message: "All history API sources failed.",
 details: attempts,
 },
 {
