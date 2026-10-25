@@ -2,706 +2,1648 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-type Result = {
-issueNumber: string;
-number: number;
-color?: string;
-};
-
-type Signal = {
-period: string;
-number: number;
-size: "BIG" | "SMALL";
-color: string;
-confidence: number;
+type HistoryItem = {
+  issueNumber: string;
+  number: number;
+  color: string;
 };
 
 type ApiResponse = {
-ok?: boolean;
-source?: string;
-data?: unknown;
-error?: string;
-details?: string;
+  ok?: boolean;
+  source?: string;
+  data?: unknown;
+  message?: string;
 };
 
-function extractRows(value: unknown): unknown[] {
-if (Array.isArray(value)) return value;
-if (!value || typeof value !== "object") return [];
+type Signal = {
+  prediction: string;
+  number: number;
+  confidence: number;
+  reason: string;
+};
 
-const obj = value as Record<string, unknown>;
+function extractHistory(payload: unknown): HistoryItem[] {
+  const result: HistoryItem[] = [];
 
-if (Array.isArray(obj.list)) return obj.list;
-if (Array.isArray(obj.records)) return obj.records;
-if (Array.isArray(obj.data)) return obj.data;
+  function walk(value: unknown): void {
+    if (!value || typeof value !== "object") return;
 
-if (obj.data && typeof obj.data === "object") {
-return extractRows(obj.data);
-}
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
 
-if (obj.result && typeof obj.result === "object") {
-return extractRows(obj.result);
-}
+    const obj = value as Record<string, unknown>;
 
-return [];
-}
+    const issue =
+      obj.issueNumber ??
+      obj.issue ??
+      obj.period ??
+      obj.issue_number;
 
-function parseHistory(value: unknown): Result[] {
-return extractRows(value)
-.map((row): Result | null => {
-if (!row || typeof row !== "object") return null;
+    const rawNumber =
+      obj.number ??
+      obj.openNumber ??
+      obj.result ??
+      obj.openResult;
 
-  const obj = row as Record<string, unknown>;
+    const parsedNumber = Number(rawNumber);
 
-  const period =
-    obj.issueNumber ??
-    obj.issue_number ??
-    obj.issue ??
-    obj.period;
+    if (
+      issue !== undefined &&
+      issue !== null &&
+      rawNumber !== undefined &&
+      Number.isFinite(parsedNumber) &&
+      parsedNumber >= 0 &&
+      parsedNumber <= 9
+    ) {
+      const rawColor = String(obj.color ?? "").toLowerCase();
 
-  const rawNumber =
-    obj.number ??
-    obj.openNumber ??
-    obj.open_number ??
-    obj.result;
+      const color = rawColor.includes("violet")
+        ? "violet"
+        : rawColor.includes("red")
+          ? "red"
+          : rawColor.includes("green")
+            ? "green"
+            : [0, 5].includes(parsedNumber)
+              ? "violet"
+              : parsedNumber % 2 === 0
+                ? "red"
+                : "green";
 
-  const number = Number(rawNumber);
+      result.push({
+        issueNumber: String(issue),
+        number: parsedNumber,
+        color,
+      });
 
-  if (
-    period === undefined ||
-    period === null ||
-    !Number.isInteger(number) ||
-    number < 0 ||
-    number > 9
-  ) {
-    return null;
+      return;
+    }
+
+    Object.values(obj).forEach(walk);
   }
 
+  walk(payload);
+
+  const unique = new Map<string, HistoryItem>();
+
+  result.forEach((item) => {
+    if (!unique.has(item.issueNumber)) {
+      unique.set(item.issueNumber, item);
+    }
+  });
+
+  return Array.from(unique.values());
+}
+
+function estimateNextPeriod(history: HistoryItem[]): string {
+  if (history.length === 0) return "Waiting for API";
+
+  const latest = history[0].issueNumber;
+
+  if (!/^\d+$/.test(latest)) {
+    return "Period unavailable";
+  }
+
+  try {
+    return (BigInt(latest) + BigInt(1)).toString();
+  } catch {
+    return "Period unavailable";
+  }
+}
+
+function formatCountdown(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+
+  // IMPORTANT: Template strings ke liye backticks use hote hain.
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function makeSignal(history: HistoryItem[]): Signal {
+  if (history.length < 5) {
+    return {
+      prediction: "ANALYZING",
+      number: 0,
+      confidence: 0,
+      reason: "Waiting for sufficient result history",
+    };
+  }
+
+  const recent = history.slice(0, 20);
+
+  let bigCount = 0;
+  let smallCount = 0;
+  const numberCounts = Array(10).fill(0);
+
+  recent.forEach((item) => {
+    numberCounts[item.number]++;
+
+    if (item.number >= 5) {
+      bigCount++;
+    } else {
+      smallCount++;
+    }
+  });
+
+  const bigScore = bigCount / recent.length;
+  const smallScore = smallCount / recent.length;
+
+  const prediction = bigScore >= smallScore ? "BIG" : "SMALL";
+
+  let selectedNumber = 0;
+  let highestFrequency = -1;
+
+  numberCounts.forEach((count, number) => {
+    const matchesPrediction =
+      prediction === "BIG" ? number >= 5 : number < 5;
+
+    if (matchesPrediction && count > highestFrequency) {
+      highestFrequency = count;
+      selectedNumber = number;
+    }
+  });
+
+  const confidence = Math.round(
+    Math.max(bigScore, smallScore) * 100,
+  );
+
   return {
-    issueNumber: String(period),
-    number,
-    color: typeof obj.color === "string" ? obj.color : "",
+    prediction,
+    number: selectedNumber,
+    confidence,
+    reason:
+      "Based on recent historical frequency; not a guaranteed prediction",
   };
-})
-.filter((item): item is Result => item !== null);
-
-}
-
-function incrementPeriod(period: string): string {
-if (!/^\d+$/.test(period)) return "";
-
-const digits = period.split("");
-let carry = 1;
-
-for (let i = digits.length - 1; i >= 0 && carry; i--) {
-const value = Number(digits[i]) + carry;
-
-digits[i] = String(value % 10);
-carry = value >= 10 ? 1 : 0;
-
-}
-
-if (carry) digits.unshift("1");
-
-return digits.join("");
-}
-
-function getSize(number: number): "BIG" | "SMALL" {
-return number >= 5 ? "BIG" : "SMALL";
-}
-
-function getColor(number: number): string {
-if (number === 0) return "RED + VIOLET";
-if (number === 5) return "GREEN + VIOLET";
-return number % 2 === 0 ? "RED" : "GREEN";
-}
-
-function getColorClass(color: string): string {
-if (color.includes("VIOLET")) return "violet-text";
-return color === "RED" ? "red-text" : "green-text";
-}
-
-function makeSignal(history: Result[], period: string): Signal | null {
-if (!history.length || !/^\d+$/.test(period)) return null;
-
-const recent = history.slice(0, 30);
-const scores = Array(10).fill(0) as number[];
-
-recent.forEach((item, index) => {
-const weight = Math.max(0.5, 1.5 - index * 0.035);
-scores[item.number] += weight;
-});
-
-const seed = period
-.split("")
-.reduce((total, digit) => (total + Number(digit)) % 10, 0);
-
-const highestScore = Math.max(...scores);
-
-const tiedNumbers = scores
-.map((score, number) => ({ score, number }))
-.filter((entry) => entry.score === highestScore)
-.map((entry) => entry.number);
-
-const selectedNumber = tiedNumbers[seed % tiedNumbers.length];
-
-const totalScore = scores.reduce((sum, score) => sum + score, 0);
-const frequency =
-totalScore > 0 ? (scores[selectedNumber] / totalScore) * 100 : 10;
-
-// Heuristic score only. It is not a verified winning probability.
-const confidence = Math.max(
-10,
-Math.min(95, Math.round(20 + frequency * 2)),
-);
-
-return {
-period,
-number: selectedNumber,
-size: getSize(selectedNumber),
-color: getColor(selectedNumber),
-confidence,
-};
-}
-
-function countdownText(seconds: number): string {
-const mins = Math.floor(seconds / 60);
-const secs = seconds % 60;
-
-return "${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}";
 }
 
 export default function Home() {
-const [history, setHistory] = useState<Result[]>([]);
-const [signal, setSignal] = useState<Signal | null>(null);
-const [seconds, setSeconds] = useState(59);
-const [loading, setLoading] = useState(true);
-const [refreshing, setRefreshing] = useState(false);
-const [error, setError] = useState("");
-const [source, setSource] = useState("");
-const [updated, setUpdated] = useState("");
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [apiStatus, setApiStatus] = useState("CONNECTING");
+  const [source, setSource] = useState("");
+  const [error, setError] = useState("");
+  const [countdown, setCountdown] = useState(60);
+  const [lastUpdated, setLastUpdated] = useState("");
+  const [refreshCount, setRefreshCount] = useState(0);
 
-const refresh = useCallback(async (manual = false) => {
-if (manual) setRefreshing(true);
+  const loadHistory = useCallback(async () => {
+    try {
+      const response = await fetch("/api/history", {
+        cache: "no-store",
+      });
 
-try {
-  const response = await fetch("/api/history", {
-    cache: "no-store",
-  });
+      const payload = (await response.json()) as ApiResponse;
 
-  const json = (await response.json()) as ApiResponse;
+      if (!response.ok || payload.ok === false) {
+        throw new Error(
+          payload.message || "History API request failed",
+        );
+      }
 
-  if (!response.ok || !json.ok) {
-    throw new Error(
-      json.details || json.error || `Request failed: ${response.status}`,
-    );
-  }
+      const parsed = extractHistory(payload.data ?? payload);
 
-  const rows = parseHistory(json.data);
+      if (parsed.length === 0) {
+        throw new Error("API returned no readable results");
+      }
 
-  if (!rows.length) {
-    throw new Error("API returned no readable WinGo results.");
-  }
+      setHistory(parsed);
+      setSource(payload.source || "History API");
+      setApiStatus("CONNECTED");
+      setError("");
+      setLastUpdated(new Date().toLocaleTimeString());
+      setRefreshCount((previous) => previous + 1);
+    } catch (err) {
+      setApiStatus("RETRYING");
+      setError(
+        err instanceof Error ? err.message : "Unable to load history",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  setHistory(rows);
-  setSource(json.source || "WinGo History API");
-  setUpdated(new Date().toLocaleTimeString());
-  setError("");
-} catch (err) {
-  setError(
-    err instanceof Error ? err.message : "Unable to load history.",
-  );
-} finally {
-  setLoading(false);
-  setRefreshing(false);
-}
+  useEffect(() => {
+    void loadHistory();
 
-}, []);
+    const refreshTimer = window.setInterval(() => {
+      void loadHistory();
+    }, 15000);
 
-useEffect(() => {
-const updateClock = () => {
-const now = new Date();
-setSeconds(59 - now.getSeconds());
-};
+    return () => window.clearInterval(refreshTimer);
+  }, [loadHistory]);
 
-updateClock();
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setCountdown((previous) => (previous <= 1 ? 59 : previous - 1));
+    }, 1000);
 
-const clock = window.setInterval(updateClock, 250);
-const timer = window.setInterval(() => void refresh(), 10000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-void refresh();
+  const signal = makeSignal(history);
+  const nextPeriod = estimateNextPeriod(history);
+  const latestResult = history[0];
 
-return () => {
-  window.clearInterval(clock);
-  window.clearInterval(timer);
-};
+  const bigCount = history.filter((item) => item.number >= 5).length;
+  const smallCount = history.filter((item) => item.number < 5).length;
 
-}, [refresh]);
+  return (
+    <main className="app-shell">
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
 
-const latest = history[0] ?? null;
+      <header className="topbar">
+        <a href="/" className="brand">
+          <div className="brand-logo">
+            <span>Z</span>
+          </div>
 
-// This period is estimated from the latest returned result.
-// It is not confirmed by an official current-period endpoint.
-const currentPeriod = latest
-? incrementPeriod(latest.issueNumber)
-: "";
+          <div className="brand-copy">
+            <strong>ZARA AI</strong>
+            <span>PREDICTOR</span>
+          </div>
+        </a>
 
-useEffect(() => {
-if (!currentPeriod) {
-setSignal(null);
-return;
-}
-
-setSignal(makeSignal(history, currentPeriod));
-
-}, [history, currentPeriod]);
-
-const actual = history.find(
-(item) => item.issueNumber === signal?.period,
-);
-
-let verification: "PENDING" | "WIN" | "LOSS" = "PENDING";
-
-if (signal && actual) {
-verification =
-actual.number === signal.number ? "WIN" : "LOSS";
-}
-
-const bigCount = history.filter((item) => item.number >= 5).length;
-const smallCount = history.length - bigCount;
-
-const colorClass = signal ? getColorClass(signal.color) : "";
-
-return (
-<main className="app-shell">
-<div className="background-glow background-glow-one" />
-<div className="background-glow background-glow-two" />
-
-  <div className="dashboard">
-    <header className="topbar">
-      <div className="brand">
-        <div className="brand-logo">Z</div>
-        <div>
-          <h1>ZARA <span>AI</span></h1>
-          <p>WINGO 1 MIN PREDICTOR</p>
-        </div>
-      </div>
-
-      <div className={`connection ${error ? "offline" : ""}`}>
-        <span className="status-dot" />
-        {error ? "API ISSUE" : loading ? "CONNECTING" : "SYSTEM ACTIVE"}
-      </div>
-    </header>
-
-    {error && (
-      <div className="error-banner">
-        <span>⚠</span>
-        <div>
-          <strong>History connection issue</strong>
-          <p>{error}</p>
-        </div>
-      </div>
-    )}
-
-    <section className="hero panel">
-      <div className="hero-copy">
-        <div className="eyebrow">
+        <div className="header-right">
           <span className="live-dot" />
-          LIVE ANALYTICS DASHBOARD
+          <span className="header-status">
+            {apiStatus === "CONNECTED" ? "SYSTEM ONLINE" : apiStatus}
+          </span>
+        </div>
+      </header>
+
+      <section className="hero">
+        <div className="eyebrow">
+          <span className="eyebrow-icon">✦</span>
+          WIN GO · 1 MINUTE
         </div>
 
-        <h2>
-          Read the data.
+        <h1>
+          Smart Analysis.
           <br />
-          <span>Study the next round.</span>
-        </h2>
+          <span>Clear Insights.</span>
+        </h1>
 
-        <p>
-          Experimental history-based signals, automatic result
-          verification and live round monitoring.
+        <p className="hero-description">
+          Track recent results, monitor the countdown, and explore
+          experimental BIG/SMALL signals based on historical data.
         </p>
 
-        <button
-          className="refresh-button"
-          type="button"
-          onClick={() => void refresh(true)}
-          disabled={refreshing}
-        >
-          <span className={refreshing ? "spin" : ""}>↻</span>
-          {refreshing ? "Refreshing..." : "Refresh History"}
-        </button>
-      </div>
-
-      <div className="clock-card">
-        <div className="card-label">
-          <span>ROUND COUNTDOWN</span>
-          <span>◷</span>
+        <div className="hero-tags">
+          <span>◈ History Analysis</span>
+          <span>◷ Auto Refresh</span>
+          <span>⌁ Live Dashboard</span>
         </div>
+      </section>
 
-        <div className="countdown">{countdownText(seconds)}</div>
-        <p className="muted">Based on your device clock</p>
-
-        <div className="divider" />
-
-        <p className="card-label">LATEST COMPLETED PERIOD</p>
-
-        <div className="period-number">
-          {latest?.issueNumber || "Waiting for data"}
-        </div>
-      </div>
-    </section>
-
-    <section className="stats-grid">
-      <div className="stat-card panel">
-        <div className="stat-heading">
-          <span>Latest Number</span>
-          <span className="stat-icon">◉</span>
-        </div>
-
-        <div className="stat-main">
-          <div
-            className={`number-ball ${
-              latest
-                ? latest.number === 0
-                  ? "ball-red"
-                  : latest.number === 5
-                    ? "ball-violet"
-                    : latest.number % 2 === 0
-                      ? "ball-red"
-                      : "ball-green"
-                : ""
-            }`}
-          >
-            {latest ? latest.number : "—"}
-          </div>
-
+      <section className="dashboard">
+        <div className="section-heading">
           <div>
-            <strong>{latest ? getSize(latest.number) : "--"}</strong>
-            <p className={latest ? getColorClass(getColor(latest.number)) : "muted"}>
-              {latest ? getColor(latest.number) : "No result"}
-            </p>
+            <span className="section-kicker">YOUR DASHBOARD</span>
+            <h2>Live Overview</h2>
           </div>
-        </div>
-      </div>
 
-      <div className="stat-card panel">
-        <div className="stat-heading">
-          <span>History Loaded</span>
-          <span className="stat-icon">▤</span>
-        </div>
-        <div className="stat-value">{history.length}</div>
-        <p className="muted">Completed results</p>
-      </div>
-
-      <div className="stat-card panel">
-        <div className="stat-heading">
-          <span>Big Results</span>
-          <span className="stat-icon amber">↗</span>
-        </div>
-        <div className="stat-value amber">{bigCount}</div>
-        <p className="muted">Numbers 5–9</p>
-      </div>
-
-      <div className="stat-card panel">
-        <div className="stat-heading">
-          <span>Small Results</span>
-          <span className="stat-icon blue">↘</span>
-        </div>
-        <div className="stat-value blue">{smallCount}</div>
-        <p className="muted">Numbers 0–4</p>
-      </div>
-    </section>
-
-    <section className="signal-section panel">
-      <div className="section-heading">
-        <div>
-          <div className="eyebrow">
-            <span className="live-dot" />
-            EXPERIMENTAL SIGNAL
-          </div>
-          <h3>Current Period Prediction</h3>
-          <p className="muted">
-            Calculated from recent completed results
-          </p>
+          <button
+            className="refresh-button"
+            onClick={() => void loadHistory()}
+            disabled={loading}
+          >
+            <span className={loading ? "spin" : ""}>↻</span>
+            Refresh
+          </button>
         </div>
 
-        <div className="ai-badge">ZARA AI</div>
-      </div>
+        <div className="stats-grid">
+          <article className="stat-card">
+            <div className="stat-top">
+              <span className="stat-label">API STATUS</span>
+              <span className="stat-icon green-icon">⌁</span>
+            </div>
 
-      <div className="signal-period">
-        <span className="muted">ESTIMATED TARGET PERIOD</span>
-        <strong>{signal?.period || "Waiting for history..."}</strong>
-      </div>
+            <div
+              className={`stat-value ${
+                apiStatus === "CONNECTED" ? "green-text" : ""
+              }`}
+            >
+              {apiStatus === "CONNECTED" ? "Online" : apiStatus}
+            </div>
 
-      {signal ? (
-        <>
-          <div className="signal-grid">
-            <div className="signal-tile">
-              <span className="tile-label">BIG / SMALL</span>
-              <strong className={signal.size === "BIG" ? "amber" : "blue"}>
-                {signal.size}
-              </strong>
-              <span className="tile-caption">
-                {signal.size === "BIG" ? "Range 5–9" : "Range 0–4"}
+            <div className="stat-foot">
+              {source || "Connecting to history API"}
+            </div>
+          </article>
+
+          <article className="stat-card">
+            <div className="stat-top">
+              <span className="stat-label">BIG RESULTS</span>
+              <span className="stat-icon purple-icon">↗</span>
+            </div>
+
+            <div className="stat-value">{bigCount}</div>
+            <div className="stat-foot">Loaded history records</div>
+          </article>
+
+          <article className="stat-card">
+            <div className="stat-top">
+              <span className="stat-label">SMALL RESULTS</span>
+              <span className="stat-icon orange-icon">↘</span>
+            </div>
+
+            <div className="stat-value">{smallCount}</div>
+            <div className="stat-foot">Loaded history records</div>
+          </article>
+        </div>
+
+        <div className="main-grid">
+          <article className="panel signal-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="panel-kicker">EXPERIMENTAL SIGNAL</span>
+                <h3>Next Round Analysis</h3>
+              </div>
+
+              <span className="analysis-badge">BETA</span>
+            </div>
+
+            <div className="period-box">
+              <span className="muted-label">ESTIMATED NEXT PERIOD</span>
+              <strong className="period-number">{nextPeriod}</strong>
+            </div>
+
+            <div className="countdown-row">
+              <div>
+                <span className="muted-label">ROUND TIMER</span>
+                <div className="countdown">
+                  {formatCountdown(countdown)}
+                </div>
+              </div>
+
+              <div className="timer-icon">◷</div>
+            </div>
+
+            <div className="signal-divider" />
+
+            <div className="signal-result">
+              <div>
+                <span className="muted-label">HISTORICAL TREND SIGNAL</span>
+
+                <div
+                  className={`signal-pill ${
+                    signal.prediction === "BIG"
+                      ? "big-pill"
+                      : signal.prediction === "SMALL"
+                        ? "small-pill"
+                        : "waiting-pill"
+                  }`}
+                >
+                  {loading && history.length === 0
+                    ? "LOADING"
+                    : signal.prediction}
+                </div>
+              </div>
+
+              <div className="signal-number">
+                <span className="muted-label">FREQUENT NUMBER</span>
+                <div className="number-orb">
+                  {history.length ? signal.number : "—"}
+                </div>
+              </div>
+            </div>
+
+            <div className="confidence-box">
+              <div className="confidence-heading">
+                <span>Historical Frequency Share</span>
+                <strong>
+                  {history.length ? `${signal.confidence}%` : "—"}
+                </strong>
+              </div>
+
+              <div className="progress-track">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${history.length ? signal.confidence : 0}%`,
+                  }}
+                />
+              </div>
+
+              <p className="signal-note">{signal.reason}</p>
+            </div>
+
+            <div className="disclaimer">
+              <span>ⓘ</span>
+              <p>
+                This is an experimental statistical indicator, not a
+                verified AI prediction. Past results do not determine
+                future outcomes. No win is guaranteed.
+              </p>
+            </div>
+          </article>
+
+          <article className="panel latest-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="panel-kicker">MOST RECENT DATA</span>
+                <h3>Latest Result</h3>
+              </div>
+
+              <span className="live-label">
+                <span className="live-dot" />
+                HISTORY
               </span>
             </div>
 
-            <div className="signal-tile">
-              <span className="tile-label">COLOR SIGNAL</span>
-              <strong className={colorClass}>{signal.color}</strong>
-              <span className="tile-caption">Based on selected number</span>
+            {latestResult ? (
+              <>
+                <div className="latest-orb-wrap">
+                  <div
+                    className={`latest-orb ${latestResult.color}`}
+                  >
+                    {latestResult.number}
+                  </div>
+                </div>
+
+                <div className="latest-color">
+                  <span
+                    className={`color-dot ${latestResult.color}`}
+                  />
+                  {latestResult.color.toUpperCase()}
+                </div>
+
+                <div className="latest-period">
+                  <span className="muted-label">PERIOD NUMBER</span>
+                  <strong>{latestResult.issueNumber}</strong>
+                </div>
+              </>
+            ) : (
+              <div className="empty-state">
+                <div className="empty-symbol">◌</div>
+                <strong>
+                  {loading ? "Loading results..." : "No result available"}
+                </strong>
+                <span>
+                  {error || "Waiting for the history API"}
+                </span>
+              </div>
+            )}
+
+            <div className="latest-footer">
+              <span>Last update</span>
+              <strong>{lastUpdated || "Waiting..."}</strong>
+            </div>
+          </article>
+        </div>
+
+        <article className="panel history-panel">
+          <div className="panel-heading history-heading">
+            <div>
+              <span className="panel-kicker">REAL API DATA</span>
+              <h3>Recent History</h3>
             </div>
 
-            <div className="signal-tile number-tile">
-              <span className="tile-label">NUMBER SIGNAL</span>
-              <div
-                className={`number-ball large ${
-                  signal.number === 0
-                    ? "ball-red"
-                    : signal.number === 5
-                      ? "ball-violet"
-                      : signal.number % 2 === 0
-                        ? "ball-red"
-                        : "ball-green"
-                }`}
-              >
-                {signal.number}
+            <span className="records-badge">
+              {history.length} RECORDS
+            </span>
+          </div>
+
+          {error && (
+            <div className="error-banner">
+              <span>!</span>
+              <div>
+                <strong>History API unavailable</strong>
+                <p>{error}</p>
               </div>
             </div>
-          </div>
+          )}
 
-          <div className="confidence-box">
-            <div className="confidence-heading">
-              <span>HEURISTIC SCORE</span>
-              <strong>{signal.confidence}%</strong>
-            </div>
+          {history.length > 0 ? (
+            <div className="history-list">
+              {history.slice(0, 10).map((item, index) => (
+                <div className="history-row" key={item.issueNumber}>
+                  <div className="history-index">
+                    {String(index + 1).padStart(2, "0")}
+                  </div>
 
-            <div className="progress-track">
-              <div
-                className="progress-fill"
-                style={{ width: `${signal.confidence}%` }}
-              />
-            </div>
+                  <div className="history-period">
+                    <strong>{item.issueNumber}</strong>
+                    <span>{index === 0 ? "Latest result" : "Completed round"}</span>
+                  </div>
 
-            <p className="muted">
-              Historical-frequency score only—not a verified probability
-              of winning.
-            </p>
-          </div>
+                  <div className="history-color">
+                    <span className={`color-dot ${item.color}`} />
+                    <span>{item.color.toUpperCase()}</span>
+                  </div>
 
-          <div className={`verification ${verification.toLowerCase()}`}>
-            <div className="verification-icon">
-              {verification === "WIN"
-                ? "✓"
-                : verification === "LOSS"
-                  ? "×"
-                  : "◷"}
-            </div>
-
-            <div className="verification-copy">
-              <strong>
-                {verification === "PENDING"
-                  ? "WAITING FOR RESULT"
-                  : verification === "WIN"
-                    ? "NUMBER MATCHED"
-                    : "NUMBER NOT MATCHED"}
-              </strong>
-
-              <p>
-                {verification === "PENDING"
-                  ? "Waiting for the target period to appear in the fetched history."
-                  : `Signal number ${signal.number} · Actual number ${actual?.number}`}
-              </p>
-            </div>
-
-            <span className="verification-status">{verification}</span>
-          </div>
-        </>
-      ) : (
-        <div className="empty-state">
-          {loading
-            ? "Loading history and preparing signal..."
-            : "A signal is unavailable until valid history loads."}
-        </div>
-      )}
-    </section>
-
-    <section className="two-column">
-      <div className="panel content-card">
-        <div className="section-heading compact">
-          <div>
-            <h3>Historical Distribution</h3>
-            <p className="muted">Loaded results only</p>
-          </div>
-          <span className="stat-icon">▥</span>
-        </div>
-
-        <div className="distribution-item">
-          <div className="distribution-heading">
-            <span className="amber">BIG</span>
-            <strong>
-              {history.length
-                ? Math.round((bigCount / history.length) * 100)
-                : 0}%
-            </strong>
-          </div>
-
-          <div className="progress-track">
-            <div
-              className="progress-fill amber-fill"
-              style={{
-                width: `${history.length ? (bigCount / history.length) * 100 : 0}%`,
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="distribution-item">
-          <div className="distribution-heading">
-            <span className="blue">SMALL</span>
-            <strong>
-              {history.length
-                ? Math.round((smallCount / history.length) * 100)
-                : 0}%
-            </strong>
-          </div>
-
-          <div className="progress-track">
-            <div
-              className="progress-fill blue-fill"
-              style={{
-                width: `${history.length ? (smallCount / history.length) * 100 : 0}%`,
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="info-note">
-          Historical frequency does not guarantee the next outcome.
-        </div>
-      </div>
-
-      <div className="panel content-card">
-        <div className="section-heading compact">
-          <div>
-            <h3>System Monitor</h3>
-            <p className="muted">Data connection status</p>
-          </div>
-          <span className="stat-icon">⌁</span>
-        </div>
-
-        <div className="monitor-row">
-          <span>History API</span>
-          <strong className={error ? "red-text" : "green-text"}>
-            {error ? "CHECK CONNECTION" : loading ? "CONNECTING" : "CONNECTED"}
-          </strong>
-        </div>
-
-        <div className="monitor-row">
-          <span>Refresh interval</span>
-          <strong>10 seconds</strong>
-        </div>
-
-        <div className="monitor-row">
-          <span>Last update</span>
-          <strong>{updated || "Waiting..."}</strong>
-        </div>
-
-        <div className="monitor-row">
-          <span>Signal mode</span>
-          <strong>EXPERIMENTAL</strong>
-        </div>
-
-        <p className="source-text">
-          Source: {source || "Not connected"}
-        </p>
-      </div>
-    </section>
-
-    <section className="panel history-section">
-      <div className="section-heading">
-        <div>
-          <h3>Recent WinGo Results</h3>
-          <p className="muted">
-            Actual completed results returned by the API
-          </p>
-        </div>
-        <span className="count-badge">{history.length} RESULTS</span>
-      </div>
-
-      {history.length === 0 ? (
-        <div className="empty-state">
-          {loading
-            ? "Loading results..."
-            : "No results available. Check the API connection."}
-        </div>
-      ) : (
-        <div className="table-scroll">
-          <table className="history-table">
-            <thead>
-              <tr>
-                <th>PERIOD</th>
-                <th>NUMBER</th>
-                <th>COLOR</th>
-                <th>SIZE</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {history.map((item, index) => (
-                <tr key={`${item.issueNumber}-${index}`}>
-                  <td className="period-cell">{item.issueNumber}</td>
-                  <td>
-                    <span
-                      className={`number-ball table-ball ${
-                        item.number === 0
-                          ? "ball-red"
-                          : item.number === 5
-                            ? "ball-violet"
-                            : item.number % 2 === 0
-                              ? "ball-red"
-                              : "ball-green"
-                      }`}
-                    >
-                      {item.number}
-                    </span>
-                  </td>
-                  <td className={getColorClass(getColor(item.number))}>
-                    {getColor(item.number)}
-                  </td>
-                  <td>
-                    <span
-                      className={`size-badge ${
-                        getSize(item.number) === "BIG"
-                          ? "big-badge"
-                          : "small-badge"
-                      }`}
-                    >
-                      {getSize(item.number)}
-                    </span>
-                  </td>
-                </tr>
+                  <div className={`history-number ${item.color}`}>
+                    {item.number}
+                  </div>
+                </div>
               ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
+            </div>
+          ) : (
+            <div className="history-empty">
+              {loading
+                ? "Connecting to the history API..."
+                : "No history records could be loaded."}
+            </div>
+          )}
 
-    <footer className="disclaimer">
-      <strong>⚠ Responsible Use</strong>
-      <p>
-        This dashboard provides experimental statistics, not guaranteed
-        predictions. The score is not a real winning probability. The
-        target period is estimated from the latest completed result,
-        and the countdown follows your device clock.
-      </p>
-    </footer>
+          <div className="history-footer">
+            <span>
+              Auto refresh every 15 seconds · Refresh #{refreshCount}
+            </span>
+            <span>Source: {source || "Not connected"}</span>
+          </div>
+        </article>
+      </section>
 
-    <div className="footer-bottom">
-      ZARA AI PREDICTOR <span>•</span> ANALYTICS DASHBOARD
-    </div>
-  </div>
-</main>
+      <footer className="footer">
+        <a href="/" className="footer-brand">
+          <span className="footer-logo">Z</span>
+          ZARA AI PREDICTOR
+        </a>
 
-);
+        <p>Independent statistical analysis dashboard.</p>
+
+        <p className="footer-disclaimer">
+          For informational purposes only. Not financial advice.
+          Outcomes are uncertain.
+        </p>
+
+        <span className="copyright">
+          © {new Date().getFullYear()} Zara AI
+        </span>
+      </footer>
+
+      <style jsx global>{`
+        @import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+        :root {
+          color-scheme: dark;
+          --bg: #080b12;
+          --panel: rgba(17, 22, 34, 0.9);
+          --border: rgba(156, 174, 211, 0.13);
+          --text: #f5f7ff;
+          --muted: #8791a9;
+          --green: #37e6a2;
+          --purple: #a78bfa;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        html {
+          min-height: 100%;
+          background: var(--bg);
+        }
+
+        body {
+          margin: 0;
+          color: var(--text);
+          font-family: "DM Sans", sans-serif;
+          background:
+            radial-gradient(
+              ellipse at 50% 0%,
+              rgba(70, 83, 159, 0.12),
+              transparent 48%
+            ),
+            var(--bg);
+        }
+
+        button,
+        a {
+          font: inherit;
+        }
+
+        button {
+          color: inherit;
+        }
+
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+
+        .app-shell {
+          position: relative;
+          isolation: isolate;
+          min-height: 100vh;
+          overflow: hidden;
+          padding: 0 24px;
+        }
+
+        .ambient {
+          position: absolute;
+          z-index: -1;
+          width: 400px;
+          height: 400px;
+          pointer-events: none;
+          border-radius: 50%;
+          filter: blur(120px);
+          opacity: 0.1;
+        }
+
+        .ambient-one {
+          top: 400px;
+          left: -280px;
+          background: #15dca0;
+        }
+
+        .ambient-two {
+          top: 750px;
+          right: -300px;
+          background: #8b5cf6;
+        }
+
+        .topbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          max-width: 1160px;
+          height: 84px;
+          margin: 0 auto;
+          border-bottom: 1px solid var(--border);
+        }
+
+        .brand {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+
+        .brand-logo {
+          display: grid;
+          width: 43px;
+          height: 43px;
+          place-items: center;
+          border: 1px solid rgba(55, 230, 162, 0.42);
+          border-radius: 14px;
+          background: linear-gradient(
+            145deg,
+            rgba(55, 230, 162, 0.17),
+            rgba(55, 230, 162, 0.025)
+          );
+          box-shadow: 0 0 30px rgba(55, 230, 162, 0.06);
+        }
+
+        .brand-logo span {
+          color: var(--green);
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 26px;
+          font-weight: 700;
+        }
+
+        .brand-copy {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .brand-copy strong {
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 15px;
+          letter-spacing: 1.3px;
+        }
+
+        .brand-copy span {
+          color: var(--muted);
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 3px;
+        }
+
+        .header-right,
+        .live-label {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+        }
+
+        .header-status {
+          color: #aab4c9;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 1.4px;
+        }
+
+        .live-dot {
+          width: 7px;
+          height: 7px;
+          flex: 0 0 auto;
+          border-radius: 50%;
+          background: var(--green);
+          box-shadow: 0 0 12px rgba(55, 230, 162, 0.6);
+        }
+
+        .hero {
+          max-width: 800px;
+          margin: 0 auto;
+          padding: 76px 0 65px;
+          text-align: center;
+        }
+
+        .eyebrow {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 9px 14px;
+          border: 1px solid rgba(55, 230, 162, 0.18);
+          border-radius: 100px;
+          background: rgba(55, 230, 162, 0.06);
+          color: var(--green);
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 1.8px;
+        }
+
+        .eyebrow-icon {
+          font-size: 14px;
+        }
+
+        .hero h1 {
+          margin: 24px 0 16px;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: clamp(39px, 7vw, 68px);
+          font-weight: 700;
+          line-height: 1.08;
+          letter-spacing: -3px;
+        }
+
+        .hero h1 span {
+          color: transparent;
+          background: linear-gradient(
+            100deg,
+            #37e6a2 0%,
+            #91f4d0 45%,
+            #a78bfa 100%
+          );
+          background-clip: text;
+          -webkit-background-clip: text;
+        }
+
+        .hero-description {
+          max-width: 580px;
+          margin: 0 auto;
+          color: #929bb0;
+          font-size: 14px;
+          line-height: 1.9;
+        }
+
+        .hero-tags {
+          display: flex;
+          justify-content: center;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 26px;
+        }
+
+        .hero-tags span {
+          padding: 9px 12px;
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          color: #aab4c9;
+          font-size: 10px;
+        }
+
+        .dashboard {
+          max-width: 1100px;
+          margin: 0 auto;
+        }
+
+        .section-heading,
+        .panel-heading {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+        }
+
+        .section-heading {
+          margin-bottom: 20px;
+        }
+
+        .section-kicker,
+        .panel-kicker {
+          color: var(--green);
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 2px;
+        }
+
+        .section-heading h2 {
+          margin: 7px 0 0;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 25px;
+          letter-spacing: -0.8px;
+        }
+
+        .refresh-button {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          padding: 10px 15px;
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          background: #141a27;
+          color: #dce4f4;
+          font-size: 11px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: border-color 0.2s, background 0.2s;
+        }
+
+        .refresh-button:hover {
+          border-color: rgba(55, 230, 162, 0.5);
+          background: #182328;
+        }
+
+        .refresh-button:disabled {
+          cursor: wait;
+          opacity: 0.7;
+        }
+
+        .refresh-button span {
+          color: var(--green);
+          font-size: 18px;
+        }
+
+        .spin {
+          animation: rotate 1s linear infinite;
+        }
+
+        @keyframes rotate {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 16px;
+          margin-bottom: 18px;
+        }
+
+        .stat-card,
+        .panel {
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          background: var(--panel);
+          box-shadow: 0 15px 45px rgba(0, 0, 0, 0.08);
+          backdrop-filter: blur(15px);
+        }
+
+        .stat-card {
+          padding: 21px;
+        }
+
+        .stat-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .stat-label,
+        .muted-label {
+          color: var(--muted);
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 1.4px;
+        }
+
+        .stat-icon {
+          display: grid;
+          width: 31px;
+          height: 31px;
+          place-items: center;
+          border-radius: 10px;
+          font-size: 19px;
+        }
+
+        .green-icon {
+          color: var(--green);
+          background: rgba(55, 230, 162, 0.09);
+        }
+
+        .purple-icon {
+          color: var(--purple);
+          background: rgba(167, 139, 250, 0.1);
+        }
+
+        .orange-icon {
+          color: #ffb86b;
+          background: rgba(255, 184, 107, 0.1);
+        }
+
+        .stat-value {
+          margin-top: 18px;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 28px;
+          font-weight: 700;
+          overflow-wrap: anywhere;
+        }
+
+        .green-text {
+          color: var(--green);
+        }
+
+        .stat-foot {
+          margin-top: 8px;
+          color: #768197;
+          font-size: 10px;
+          overflow-wrap: anywhere;
+        }
+
+        .main-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+          align-items: stretch;
+          gap: 18px;
+          margin-bottom: 18px;
+        }
+
+        .panel {
+          min-width: 0;
+          padding: 24px;
+        }
+
+        .panel-heading {
+          margin-bottom: 23px;
+        }
+
+        .panel-heading h3 {
+          margin: 7px 0 0;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 19px;
+          letter-spacing: -0.4px;
+        }
+
+        .analysis-badge,
+        .records-badge {
+          padding: 7px 9px;
+          border: 1px solid rgba(167, 139, 250, 0.23);
+          border-radius: 7px;
+          background: rgba(167, 139, 250, 0.07);
+          color: #c5b4ff;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 1px;
+        }
+
+        .period-box {
+          display: flex;
+          flex-direction: column;
+          gap: 9px;
+          padding: 15px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: rgba(5, 9, 16, 0.4);
+        }
+
+        .period-number {
+          font-family: "Space Grotesk", sans-serif;
+          font-size: clamp(17px, 2.5vw, 24px);
+          overflow-wrap: anywhere;
+        }
+
+        .countdown-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-top: 23px;
+        }
+
+        .countdown {
+          margin-top: 7px;
+          color: var(--green);
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 36px;
+          font-weight: 700;
+          letter-spacing: 2px;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .timer-icon {
+          display: grid;
+          width: 49px;
+          height: 49px;
+          place-items: center;
+          border: 1px solid rgba(55, 230, 162, 0.17);
+          border-radius: 15px;
+          background: rgba(55, 230, 162, 0.055);
+          color: var(--green);
+          font-size: 27px;
+        }
+
+        .signal-divider {
+          height: 1px;
+          margin: 22px 0;
+          background: var(--border);
+        }
+
+        .signal-result {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+        }
+
+        .signal-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 110px;
+          margin-top: 12px;
+          padding: 11px 18px;
+          border: 1px solid transparent;
+          border-radius: 9px;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 18px;
+          font-weight: 700;
+          letter-spacing: 1px;
+        }
+
+        .big-pill {
+          border-color: rgba(55, 230, 162, 0.24);
+          background: rgba(55, 230, 162, 0.1);
+          color: var(--green);
+        }
+
+        .small-pill {
+          border-color: rgba(167, 139, 250, 0.25);
+          background: rgba(167, 139, 250, 0.1);
+          color: #c5b4ff;
+        }
+
+        .waiting-pill {
+          border-color: var(--border);
+          background: rgba(255, 255, 255, 0.03);
+          color: #aab4c9;
+        }
+
+        .signal-number {
+          text-align: right;
+        }
+
+        .number-orb {
+          display: grid;
+          width: 48px;
+          height: 48px;
+          margin: 8px 0 0 auto;
+          place-items: center;
+          border: 1px solid rgba(55, 230, 162, 0.3);
+          border-radius: 50%;
+          background: rgba(55, 230, 162, 0.08);
+          color: var(--green);
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 22px;
+          font-weight: 700;
+        }
+
+        .confidence-box {
+          margin-top: 23px;
+        }
+
+        .confidence-heading {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 10px;
+          color: #aab4c9;
+          font-size: 10px;
+        }
+
+        .confidence-heading strong {
+          color: var(--green);
+        }
+
+        .progress-track {
+          height: 6px;
+          overflow: hidden;
+          border-radius: 10px;
+          background: #252b39;
+        }
+
+        .progress-fill {
+          height: 100%;
+          border-radius: inherit;
+          background: linear-gradient(90deg, #26bc87, #37e6a2);
+          transition: width 0.3s ease;
+        }
+
+        .signal-note {
+          margin: 10px 0 0;
+          color: #778197;
+          font-size: 10px;
+          line-height: 1.6;
+        }
+
+        .disclaimer {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          margin-top: 20px;
+          padding: 12px;
+          border: 1px solid rgba(255, 184, 107, 0.15);
+          border-radius: 10px;
+          background: rgba(255, 184, 107, 0.045);
+          color: #ffcc8d;
+        }
+
+        .disclaimer > span {
+          font-size: 15px;
+        }
+
+        .disclaimer p {
+          margin: 0;
+          color: #b5a58f;
+          font-size: 10px;
+          line-height: 1.7;
+        }
+
+        .live-label {
+          color: #9da8bc;
+          font-size: 9px;
+          font-weight: 800;
+          letter-spacing: 1px;
+        }
+
+        .latest-orb-wrap {
+          display: grid;
+          min-height: 160px;
+          place-items: center;
+          margin-top: 4px;
+          background: radial-gradient(
+            circle,
+            rgba(55, 230, 162, 0.055),
+            transparent 65%
+          );
+        }
+
+        .latest-orb {
+          display: grid;
+          width: 105px;
+          height: 105px;
+          place-items: center;
+          border: 2px solid rgba(55, 230, 162, 0.45);
+          border-radius: 50%;
+          background: linear-gradient(
+            145deg,
+            rgba(55, 230, 162, 0.15),
+            rgba(55, 230, 162, 0.025)
+          );
+          box-shadow:
+            0 0 0 9px rgba(55, 230, 162, 0.025),
+            0 0 50px rgba(55, 230, 162, 0.1);
+          color: var(--green);
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 44px;
+          font-weight: 700;
+        }
+
+        .latest-orb.red {
+          border-color: rgba(255, 92, 114, 0.45);
+          background: rgba(255, 92, 114, 0.09);
+          color: #ff7286;
+          box-shadow: 0 0 40px rgba(255, 92, 114, 0.08);
+        }
+
+        .latest-orb.violet {
+          border-color: rgba(167, 139, 250, 0.5);
+          background: rgba(167, 139, 250, 0.09);
+          color: #c5b4ff;
+          box-shadow: 0 0 40px rgba(167, 139, 250, 0.08);
+        }
+
+        .latest-color {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          margin: 3px 0 25px;
+          color: #d8deec;
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 1.6px;
+        }
+
+        .color-dot {
+          display: inline-block;
+          width: 8px;
+          height: 8px;
+          flex: 0 0 auto;
+          border-radius: 50%;
+        }
+
+        .color-dot.green {
+          background: var(--green);
+          box-shadow: 0 0 9px rgba(55, 230, 162, 0.3);
+        }
+
+        .color-dot.red {
+          background: #ff657c;
+          box-shadow: 0 0 9px rgba(255, 101, 124, 0.3);
+        }
+
+        .color-dot.violet {
+          background: #ad8cff;
+          box-shadow: 0 0 9px rgba(173, 140, 255, 0.3);
+        }
+
+        .latest-period {
+          display: flex;
+          flex-direction: column;
+          gap: 9px;
+          padding: 14px;
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          background: rgba(5, 9, 16, 0.35);
+        }
+
+        .latest-period strong {
+          font-size: 12px;
+          overflow-wrap: anywhere;
+        }
+
+        .latest-footer {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          margin-top: 16px;
+          color: #78849a;
+          font-size: 10px;
+        }
+
+        .latest-footer strong {
+          color: #b5bfd2;
+          font-weight: 500;
+        }
+
+        .empty-state {
+          display: flex;
+          min-height: 310px;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          text-align: center;
+        }
+
+        .empty-symbol {
+          color: var(--green);
+          font-size: 42px;
+        }
+
+        .empty-state strong {
+          font-size: 13px;
+        }
+
+        .empty-state span {
+          max-width: 260px;
+          color: var(--muted);
+          font-size: 11px;
+          overflow-wrap: anywhere;
+        }
+
+        .history-panel {
+          margin-bottom: 25px;
+        }
+
+        .history-heading {
+          margin-bottom: 20px;
+        }
+
+        .history-list {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .history-row {
+          display: grid;
+          grid-template-columns: 38px minmax(0, 1fr) 100px 40px;
+          align-items: center;
+          gap: 13px;
+          min-width: 0;
+          padding: 15px 0;
+          border-bottom: 1px solid rgba(156, 174, 211, 0.09);
+        }
+
+        .history-row:last-child {
+          border-bottom: 0;
+        }
+
+        .history-index {
+          display: grid;
+          width: 30px;
+          height: 30px;
+          place-items: center;
+          border: 1px solid var(--border);
+          border-radius: 9px;
+          color: #778197;
+          font-size: 10px;
+        }
+
+        .history-period {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          gap: 5px;
+        }
+
+        .history-period strong {
+          font-size: 11px;
+          font-weight: 600;
+          overflow-wrap: anywhere;
+        }
+
+        .history-period span {
+          color: #78849a;
+          font-size: 9px;
+        }
+
+        .history-color {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          color: #aab4c9;
+          font-size: 9px;
+          font-weight: 700;
+        }
+
+        .history-number {
+          display: grid;
+          width: 35px;
+          height: 35px;
+          place-items: center;
+          border: 1px solid var(--border);
+          border-radius: 11px;
+          background: rgba(255, 255, 255, 0.025);
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 17px;
+          font-weight: 700;
+        }
+
+        .history-number.green {
+          color: var(--green);
+        }
+
+        .history-number.red {
+          color: #ff7286;
+        }
+
+        .history-number.violet {
+          color: #c5b4ff;
+        }
+
+        .history-footer {
+          display: flex;
+          justify-content: space-between;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 15px;
+          padding-top: 14px;
+          border-top: 1px solid var(--border);
+          color: #778197;
+          font-size: 9px;
+          overflow-wrap: anywhere;
+        }
+
+        .history-empty {
+          padding: 35px 10px;
+          color: var(--muted);
+          font-size: 12px;
+          text-align: center;
+        }
+
+        .error-banner {
+          display: flex;
+          align-items: flex-start;
+          gap: 11px;
+          margin-bottom: 12px;
+          padding: 13px;
+          border: 1px solid rgba(255, 101, 124, 0.2);
+          border-radius: 10px;
+          background: rgba(255, 101, 124, 0.05);
+        }
+
+        .error-banner > span {
+          display: grid;
+          width: 22px;
+          height: 22px;
+          flex: 0 0 auto;
+          place-items: center;
+          border-radius: 50%;
+          background: rgba(255, 101, 124, 0.13);
+          color: #ff7286;
+          font-weight: 800;
+        }
+
+        .error-banner strong {
+          color: #ff9aa9;
+          font-size: 11px;
+        }
+
+        .error-banner p {
+          margin: 5px 0 0;
+          color: #b7a0a7;
+          font-size: 10px;
+          line-height: 1.6;
+          overflow-wrap: anywhere;
+        }
+
+        .footer {
+          display: flex;
+          max-width: 1100px;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+          margin: 0 auto;
+          padding: 35px 0 30px;
+          border-top: 1px solid var(--border);
+          text-align: center;
+        }
+
+        .footer-brand {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          font-family: "Space Grotesk", sans-serif;
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 1px;
+        }
+
+        .footer-logo {
+          display: grid;
+          width: 26px;
+          height: 26px;
+          place-items: center;
+          border: 1px solid rgba(55, 230, 162, 0.3);
+          border-radius: 8px;
+          color: var(--green);
+        }
+
+        .footer p {
+          margin: 0;
+          color: #78849a;
+          font-size: 10px;
+          line-height: 1.7;
+        }
+
+        .footer .footer-disclaimer {
+          max-width: 480px;
+          color: #a38d77;
+        }
+
+        .copyright {
+          margin-top: 4px;
+          color: #5f6a80;
+          font-size: 9px;
+        }
+
+        @media (max-width: 760px) {
+          .app-shell {
+            padding: 0 16px;
+          }
+
+          .topbar {
+            height: 72px;
+          }
+
+          .brand-logo {
+            width: 38px;
+            height: 38px;
+          }
+
+          .brand-copy strong {
+            font-size: 13px;
+          }
+
+          .brand-copy span {
+            font-size: 9px;
+          }
+
+          .header-status {
+            font-size: 8px;
+            letter-spacing: 0.7px;
+          }
+
+          .hero {
+            padding: 60px 0 48px;
+          }
+
+          .hero h1 {
+            letter-spacing: -1.8px;
+          }
+
+          .hero-description {
+            font-size: 13px;
+          }
+
+          .stats-grid {
+            grid-template-columns: 1fr;
+            gap: 10px;
+          }
+
+          .stat-card {
+            padding: 16px;
+          }
+
+          .stat-value {
+            margin-top: 12px;
+            font-size: 24px;
+          }
+
+          .main-grid {
+            grid-template-columns: 1fr;
+            gap: 14px;
+          }
+
+          .panel {
+            padding: 19px;
+          }
+
+          .history-row {
+            grid-template-columns: 29px minmax(0, 1fr) 70px 35px;
+            gap: 8px;
+          }
+
+          .history-index {
+            width: 27px;
+            height: 27px;
+          }
+
+          .history-period strong {
+            font-size: 10px;
+          }
+
+          .history-color {
+            gap: 5px;
+            font-size: 8px;
+          }
+
+          .history-number {
+            width: 32px;
+            height: 32px;
+          }
+        }
+
+        @media (max-width: 380px) {
+          .app-shell {
+            padding: 0 11px;
+          }
+
+          .brand {
+            gap: 8px;
+          }
+
+          .brand-copy strong {
+            font-size: 11px;
+          }
+
+          .header-status {
+            font-size: 7px;
+          }
+
+          .panel {
+            padding: 15px;
+          }
+
+          .history-row {
+            grid-template-columns: 25px minmax(0, 1fr) 31px;
+          }
+
+          .history-color {
+            display: none;
+          }
+
+          .history-index {
+            width: 24px;
+            height: 24px;
+          }
+
+          .period-number {
+            font-size: 16px;
+          }
+
+          .countdown {
+            font-size: 31px;
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          *,
+          *::before,
+          *::after {
+            scroll-behavior: auto !important;
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+          }
+        }
+      `}</style>
+    </main>
+  );
 }
