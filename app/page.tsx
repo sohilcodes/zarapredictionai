@@ -26,14 +26,12 @@ details?: string;
 
 function extractRows(value: unknown): unknown[] {
 if (Array.isArray(value)) return value;
-
 if (!value || typeof value !== "object") return [];
 
 const obj = value as Record<string, unknown>;
 
 if (Array.isArray(obj.list)) return obj.list;
 if (Array.isArray(obj.records)) return obj.records;
-
 if (Array.isArray(obj.data)) return obj.data;
 
 if (obj.data && typeof obj.data === "object") {
@@ -89,7 +87,7 @@ if (!row || typeof row !== "object") return null;
 }
 
 function incrementPeriod(period: string): string {
-if (!/^\d+$/.test(period)) return "Waiting for period";
+if (!/^\d+$/.test(period)) return "";
 
 const digits = period.split("");
 let carry = 1;
@@ -114,7 +112,6 @@ return number >= 5 ? "BIG" : "SMALL";
 function getColor(number: number): string {
 if (number === 0) return "RED + VIOLET";
 if (number === 5) return "GREEN + VIOLET";
-
 return number % 2 === 0 ? "RED" : "GREEN";
 }
 
@@ -123,45 +120,38 @@ if (color.includes("VIOLET")) return "violet-text";
 return color === "RED" ? "red-text" : "green-text";
 }
 
-/*
-
-* Experimental history-based scoring.
-* It is not a trained AI model and cannot know future results.
-* Recent observations receive slightly more weight.
-  */
-  function makeSignal(history: Result[], period: string): Signal | null {
-  if (!history.length || !/^\d+$/.test(period)) return null;
+function makeSignal(history: Result[], period: string): Signal | null {
+if (!history.length || !/^\d+$/.test(period)) return null;
 
 const recent = history.slice(0, 30);
 const scores = Array(10).fill(0) as number[];
 
 recent.forEach((item, index) => {
-const recencyWeight = Math.max(0.5, 1.5 - index * 0.035);
-scores[item.number] += recencyWeight;
+const weight = Math.max(0.5, 1.5 - index * 0.035);
+scores[item.number] += weight;
 });
 
-// Use the period digits only to break ties consistently.
-const periodSeed = period
+const seed = period
 .split("")
 .reduce((total, digit) => (total + Number(digit)) % 10, 0);
 
 const highestScore = Math.max(...scores);
+
 const tiedNumbers = scores
 .map((score, number) => ({ score, number }))
 .filter((entry) => entry.score === highestScore)
 .map((entry) => entry.number);
 
-const selectedNumber =
-tiedNumbers[periodSeed % tiedNumbers.length];
+const selectedNumber = tiedNumbers[seed % tiedNumbers.length];
 
 const totalScore = scores.reduce((sum, score) => sum + score, 0);
-const normalizedScore =
+const frequency =
 totalScore > 0 ? (scores[selectedNumber] / totalScore) * 100 : 10;
 
-// This is a heuristic score, NOT a real probability of winning.
+// Heuristic score only. It is not a verified winning probability.
 const confidence = Math.max(
 10,
-Math.min(95, Math.round(20 + normalizedScore * 2)),
+Math.min(95, Math.round(20 + frequency * 2)),
 );
 
 return {
@@ -183,13 +173,12 @@ return "${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}";
 export default function Home() {
 const [history, setHistory] = useState<Result[]>([]);
 const [signal, setSignal] = useState<Signal | null>(null);
-const [seconds, setSeconds] = useState(0);
+const [seconds, setSeconds] = useState(59);
 const [loading, setLoading] = useState(true);
 const [refreshing, setRefreshing] = useState(false);
 const [error, setError] = useState("");
 const [source, setSource] = useState("");
 const [updated, setUpdated] = useState("");
-const [lastCheckedPeriod, setLastCheckedPeriod] = useState("");
 
 const refresh = useCallback(async (manual = false) => {
 if (manual) setRefreshing(true);
@@ -250,12 +239,14 @@ return () => {
 
 const latest = history[0] ?? null;
 
+// This period is estimated from the latest returned result.
+// It is not confirmed by an official current-period endpoint.
 const currentPeriod = latest
 ? incrementPeriod(latest.issueNumber)
 : "";
 
 useEffect(() => {
-if (!currentPeriod || !/^\d+$/.test(currentPeriod)) {
+if (!currentPeriod) {
 setSignal(null);
 return;
 }
@@ -278,11 +269,6 @@ actual.number === signal.number ? "WIN" : "LOSS";
 const bigCount = history.filter((item) => item.number >= 5).length;
 const smallCount = history.length - bigCount;
 
-const checkedSignals = history.filter((item) => {
-const next = incrementPeriod(item.issueNumber);
-return /^\d+$/.test(next);
-}).length;
-
 const colorClass = signal ? getColorClass(signal.color) : "";
 
 return (
@@ -294,7 +280,6 @@ return (
     <header className="topbar">
       <div className="brand">
         <div className="brand-logo">Z</div>
-
         <div>
           <h1>ZARA <span>AI</span></h1>
           <p>WINGO 1 MIN PREDICTOR</p>
@@ -331,7 +316,7 @@ return (
         </h2>
 
         <p>
-          Experimental history-based signals with automatic result
+          Experimental history-based signals, automatic result
           verification and live round monitoring.
         </p>
 
@@ -353,7 +338,6 @@ return (
         </div>
 
         <div className="countdown">{countdownText(seconds)}</div>
-
         <p className="muted">Based on your device clock</p>
 
         <div className="divider" />
@@ -374,7 +358,19 @@ return (
         </div>
 
         <div className="stat-main">
-          <div className={`number-ball ${latest ? (latest.number === 0 ? "ball-red" : latest.number === 5 ? "ball-violet" : latest.number % 2 === 0 ? "ball-red" : "ball-green") : ""}`}>
+          <div
+            className={`number-ball ${
+              latest
+                ? latest.number === 0
+                  ? "ball-red"
+                  : latest.number === 5
+                    ? "ball-violet"
+                    : latest.number % 2 === 0
+                      ? "ball-red"
+                      : "ball-green"
+                : ""
+            }`}
+          >
             {latest ? latest.number : "—"}
           </div>
 
@@ -432,7 +428,7 @@ return (
       </div>
 
       <div className="signal-period">
-        <span className="muted">TARGET PERIOD</span>
+        <span className="muted">ESTIMATED TARGET PERIOD</span>
         <strong>{signal?.period || "Waiting for history..."}</strong>
       </div>
 
@@ -457,7 +453,17 @@ return (
 
             <div className="signal-tile number-tile">
               <span className="tile-label">NUMBER SIGNAL</span>
-              <div className={`number-ball large ${signal.number === 0 ? "ball-red" : signal.number === 5 ? "ball-violet" : signal.number % 2 === 0 ? "ball-red" : "ball-green"}`}>
+              <div
+                className={`number-ball large ${
+                  signal.number === 0
+                    ? "ball-red"
+                    : signal.number === 5
+                      ? "ball-violet"
+                      : signal.number % 2 === 0
+                        ? "ball-red"
+                        : "ball-green"
+                }`}
+              >
                 {signal.number}
               </div>
             </div>
@@ -477,8 +483,8 @@ return (
             </div>
 
             <p className="muted">
-              A model score based on historical frequency—not a verified
-              probability of winning.
+              Historical-frequency score only—not a verified probability
+              of winning.
             </p>
           </div>
 
@@ -502,7 +508,7 @@ return (
 
               <p>
                 {verification === "PENDING"
-                  ? "The actual result has not appeared in the fetched history yet."
+                  ? "Waiting for the target period to appear in the fetched history."
                   : `Signal number ${signal.number} · Actual number ${actual?.number}`}
               </p>
             </div>
@@ -512,7 +518,9 @@ return (
         </>
       ) : (
         <div className="empty-state">
-          {loading ? "Loading history and preparing signal..." : "A signal is not available until valid history is loaded."}
+          {loading
+            ? "Loading history and preparing signal..."
+            : "A signal is unavailable until valid history loads."}
         </div>
       )}
     </section>
@@ -603,7 +611,9 @@ return (
           <strong>EXPERIMENTAL</strong>
         </div>
 
-        <p className="source-text">Source: {source || "Not connected"}</p>
+        <p className="source-text">
+          Source: {source || "Not connected"}
+        </p>
       </div>
     </section>
 
@@ -611,14 +621,18 @@ return (
       <div className="section-heading">
         <div>
           <h3>Recent WinGo Results</h3>
-          <p className="muted">Actual completed results returned by the API</p>
+          <p className="muted">
+            Actual completed results returned by the API
+          </p>
         </div>
         <span className="count-badge">{history.length} RESULTS</span>
       </div>
 
       {history.length === 0 ? (
         <div className="empty-state">
-          {loading ? "Loading results..." : "No results available. Check the API connection."}
+          {loading
+            ? "Loading results..."
+            : "No results available. Check the API connection."}
         </div>
       ) : (
         <div className="table-scroll">
@@ -637,7 +651,17 @@ return (
                 <tr key={`${item.issueNumber}-${index}`}>
                   <td className="period-cell">{item.issueNumber}</td>
                   <td>
-                    <span className={`number-ball table-ball ${item.number === 0 ? "ball-red" : item.number === 5 ? "ball-violet" : item.number % 2 === 0 ? "ball-red" : "ball-green"}`}>
+                    <span
+                      className={`number-ball table-ball ${
+                        item.number === 0
+                          ? "ball-red"
+                          : item.number === 5
+                            ? "ball-violet"
+                            : item.number % 2 === 0
+                              ? "ball-red"
+                              : "ball-green"
+                      }`}
+                    >
                       {item.number}
                     </span>
                   </td>
@@ -645,7 +669,13 @@ return (
                     {getColor(item.number)}
                   </td>
                   <td>
-                    <span className={`size-badge ${getSize(item.number) === "BIG" ? "big-badge" : "small-badge"}`}>
+                    <span
+                      className={`size-badge ${
+                        getSize(item.number) === "BIG"
+                          ? "big-badge"
+                          : "small-badge"
+                      }`}
+                    >
                       {getSize(item.number)}
                     </span>
                   </td>
@@ -660,11 +690,10 @@ return (
     <footer className="disclaimer">
       <strong>⚠ Responsible Use</strong>
       <p>
-        This is an experimental statistics dashboard, not a verified
-        prediction service. Results are uncertain. The signal score is
-        not a real winning probability, and no result is guaranteed.
-        Period IDs and countdown use assumptions that may not match the
-        official game clock.
+        This dashboard provides experimental statistics, not guaranteed
+        predictions. The score is not a real winning probability. The
+        target period is estimated from the latest completed result,
+        and the countdown follows your device clock.
       </p>
     </footer>
 
